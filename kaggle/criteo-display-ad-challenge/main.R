@@ -1,15 +1,15 @@
 require(data.table)   # fast aggregation of large data
-#require(colbycol)     # efficient parsing of csv and random data sampling
 require(sm)           # compare density function for classification
-require(lattice)      # scatter plots
-require(hexbin)       # high density plots with binning
-require(FSelector)    # feature selection
-require(randomForest) # random forest model and feature importance
-require(LiblineaR)    # regularized logistic regression
+require(glmnet)       # regularized logistic regression
+require(Matrix)       # sparse matrix
 
 # input parameters
-runRF = FALSE
-runLR = TRUE
+runLR <- TRUE
+writeCSV <- TRUE
+numTrainingSamples <- 5000000
+numCVSamples <- 2500000
+numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
+maxUniqueValuesInCatFeatures <- 10 # only use categorical features with <= 10 unique values (memory constraint)
 
 # Logarithmic loss function (mostly from Kaggle, added na.rm=TRUE)
 llfun <- function(actual, prediction) {
@@ -20,129 +20,139 @@ llfun <- function(actual, prediction) {
   return(logloss)
 }
 
-# Load data and process features
-if (!exists('data.dt'))
+CleanseRawDatatable <- function(dt)
 {
-  ###### TODO ######
-#   Need a different way to randomly sample from training data
-#   Cannot use cbc, because it drops rows with missing value!
-#
-#   set.seed(1234)
-#   samplingRate = 0.001
-#   train.cbc <- cbc.read.table('train.csv',
-#                           sample.pct = samplingRate,
-#                           sep = ',',
-#                           fill = TRUE,
-#                           header = TRUE)
-#    
-#   train.dt <- as.data.table(as.data.frame(train.cbc))
+  int_features <- grep('^I[0-9]+', colnames(dt), value=TRUE)
+  cat_features <- grep('^C[0-9]+', colnames(dt), value=TRUE)
+  
+  # Convert integer feature columns to class integer
+  dt[, (int_features):=lapply(.SD,as.integer), .SDcols = int_features]
+  
+  # Convert categorical feature columns to class factor
+  dt[, (cat_features):=lapply(.SD,as.factor), .SDcols=cat_features]
+  
+  # Convert label column to factor
+  dt[, Label:=as.factor(Label)]
+  
+  # Add indictor variables for missing integer features
+  missingCols <- sapply(int_features, function(x) { paste('Missing', x, sep='_') })
+  dt[, (missingCols):=lapply(.SD, is.na), .SDcols = int_features]
+  dt[, (missingCols):=lapply(.SD, as.integer), .SDcols = missingCols]
+  
+  # Replace NAs in integer features with median value of column
+  impute.median <- function(x) replace(x, is.na(x), round(median(x, na.rm = TRUE)))
+  dt[, (int_features):=lapply(.SD, impute.median), .SDcols = int_features]
+}
 
-  # Read training data from CSV
-  if (!file.exists('train.csv'))
+# Generate feature matrix from data table
+GetFeatureMatrix <- function(dt)
+{
+  int_features <- grep('^I[0-9]+', colnames(dt), value=TRUE)
+  cat_features <- grep('^C[0-9]+', colnames(dt), value=TRUE)
+  missingCol_features <- grep('^Missing', colnames(dt), value = TRUE)
+  
+  # Use categorical features with at most 10 unique values
+  numUniqueFeatureValues <- sapply(lapply(train.dt[, cat_features, with=FALSE], unique), length)
+  catFeaturesToTrain <- cat_features[numUniqueFeatureValues <= maxUniqueValuesInCatFeatures]
+  
+  # Use normalized Id to approximate time of day
+  normId <- ((dt$Id - 1e7) %% numSamplesPerDay) / numSamplesPerDay
+  
+  # return feature matrix
+  cbind(as.matrix(dt[, int_features, with = FALSE]),
+        as.matrix(dt[, missingCol_features, with = FALSE]),
+        model.matrix(~ ., dt[, catFeaturesToTrain, with = FALSE]),
+        poly(normId, degree = 4, raw = TRUE))
+}
+
+# Load training and cross validation data
+if (!exists('train.dt') || !exists('cv.dt'))
+{
+  if (!file.exists('train.csv') )
   {
     stop('Cannot find input file train.csv.')
   }
-  train.dt <- fread('train.csv',
-                 sep = ',',
-                 select = 1:15, # drop categorical features to save memory
-                 nrows = 100000,
-                 header = TRUE)
-
-  # Read test data from CSV
-  if (!file.exists('test.csv'))
-  {
-    stop('Cannot find input file test.csv.')
-  }
-  test.dt <- fread('test.csv',
+  
+  set.seed(1)
+  numRows <- numTrainingSamples + numCVSamples
+  randomSeq <- sample(1:numRows, numRows)
+  
+  data.dt <- fread('train.csv',
                    sep = ',',
-                   select = 1:14, # drop categorical features to save memory
+                   nrows = numRows,
                    header = TRUE)
   
-  # Add Label column to test data, set to NA
-  test.dt[, Label:=NA]
-
-  # Combine into data.dt and remove other data tables
-  data.dt <- rbind(train.dt, test.dt, use.names=TRUE)
-  rm(train.dt)
-  rm(test.dt)
-
-  int_features <- grep('I[0-9]+', colnames(data.dt), value=TRUE)
-
-  # Convert integer feature columns to class integer
-  data.dt[, (int_features):=lapply(.SD,as.integer), .SDcols=int_features]
-
-  # Convert label column to factor
-  data.dt[, Label:=as.factor(Label)]
-
-  # Add indictor variables for missing features
-  missingCols <- sapply(int_features, function(x) {paste('Missing',x,sep='_')})
-  data.dt[, (missingCols):=lapply(.SD,is.na), .SDcols=int_features]
-  data.dt[, (missingCols):=lapply(.SD,as.integer), .SDcols=missingCols]
-
-  # Replace NAs with median value of column
-  impute.median <- function(x) replace(x, is.na(x), round(median(x, na.rm = TRUE)))
-  data.dt[, (int_features):=lapply(.SD, impute.median), .SDcols=int_features]
-
-  # Feature normalization
-  data.dt[, (int_features):=lapply(.SD, scale), .SDcols=int_features]
-}
-
-# Feature selection
-allFeatures <- c(int_features, missingCols)
-data.dt[, Label:=as.numeric(Label)-1]
-data.corr <- linear.correlation(formula = as.simple.formula(allFeatures, 'Label'),
-                                data = data.dt[!is.na(Label)])
-topFeatures <- cutoff.k(data.corr, 20)
-data.dt[, Label:=as.factor(Label)]
-
-# Compare PDF of feature I2 for Label 0 vs 1d
-# sm.density.compare(train.dt$I2, train.dt$Label)
-
-# Scatter plot for features I1:I5 for Label 0 vs 1
-# splom(train.dt[, c('I1','I10'),with=FALSE], groups = train.dt$Label)
-
-# Scatter plot with binning for feature I3 vs I4
-# hexbinplot(I1 ~ I10 | Label, train.dt)
-
-# Random forest
-if (runRF)
-{
-  train.dt <- data.dt[!is.na(Label),]
-  set.seed(1234)
-  data.rf <- randomForest(as.simple.formula(allFeatures, 'Label'),
-                           data = train.dt,
-                           ntree = 100,
-                           mtry = 5,
-                           classwt = c(0.75,0.25),
-                           do.trace = 10,
-                           importance = TRUE)
-
-  # Score of trained random forest on training data
-  data.rf.score <- llfun(as.numeric(train.dt$Label)-1, data.rf$votes)
+  CleanseRawDatatable(data.dt)
+  
+  train.dt <- data.dt[randomSeq[1:numTrainingSamples],]
+  cv.dt <- data.dt[randomSeq[(numTrainingSamples+1):numRows],]
+  
+  rm(data.dt)
 }
 
 # Logistic regression
 if (runLR)
 {
-  # train logistic regression model with LiblineaR
-  train.dt <- data.dt[!is.na(Label),]
-  data.lr <- LiblineaR(data = train.dt[, topFeatures, with=FALSE],
-                      labels = train.dt$Label,
-                      type = 7, # L1 regularized
-                      bias = TRUE) # y-intercept
-
-  temp <- predict(data.lr, data.dt[, topFeatures, with=FALSE], proba=TRUE)
-  data.dt[, Predicted:=temp$probabilities[,2]]
+  # train regularized logistic model with training set
+  train.lr <- glmnet(GetFeatureMatrix(train.dt),
+                     as.matrix(train.dt$Label),
+                     family = "binomial")
   
-  # Score of trained logistic regression on training data
-  data.lr.score <- llfun(as.numeric(data.dt$Label)-1, data.dt$Predicted)
+  # run predictions on cross validation set and find the best score
+  cv.scores <- sapply(as.data.frame(predict(train.lr, 
+                                            GetFeatureMatrix(cv.dt),
+                                            type = "response")),
+                      function(x) { llfun(as.numeric(cv.dt$Label)-1, x) })
+  cv.bestscore <- min(cv.scores)
+  cv.bestlambda <- train.lr$lambda[which.min(cv.scores)]
+  cv.dt[, Predicted:=predict(train.lr, 
+                             GetFeatureMatrix(cv.dt),
+                             type = "response",
+                             s = cv.bestlambda)]
   
-  # Plot prediction vs label of training data
-  sm.density.compare(data.dt$Predicted, data.dt$Label)
+  # Plot prediction vs label of cross validation data
+  sm.density.compare(cv.dt$Predicted, cv.dt$Label)
 }
 
 # Write predictions to submission.csv
-write.csv(format(data.dt[is.na(Label),c('Id','Predicted'), with=FALSE], scientific=FALSE), 
-          'submission.csv',
-          row.names = FALSE)
+if (writeCSV) 
+{
+  # Load test data
+  if (!exists('test.dt'))
+  {
+    if (!file.exists('test.csv'))
+    {
+      stop('Cannot find input file test.csv.')
+    }
+    test.dt <- fread('test.csv',
+                     sep = ',',
+                     header = TRUE)
+    
+    # Add Label column (set to NA) to test data to match the dimension of trainig data
+    test.dt[, Label:=NA]
+    
+    CleanseRawDatatable(test.dt)
+  }
+  
+  test.dt[, Predicted:=predict(train.lr,
+                               GetFeatureMatrix(test.dt),
+                               type = "response",
+                               s = cv.bestlambda)]
+  
+  test.dt[, Predicted:=round(Predicted, 12)]
+  
+  write.csv(format(test.dt[,c('Id','Predicted'), with=FALSE],
+                   scientific=FALSE), 
+            'submission.csv',
+            quote=FALSE,
+            row.names = FALSE)
+}
 
+# Compare PDF of feature I10 for Label 0 vs 1
+# sm.density.compare(train.dt$I10, train.dt$Label)
+
+# Scatter plot for features I1:I5 for Label 0 vs 1
+# splom(train.dt[, c('I7','I9'),with=FALSE], groups = train.dt$Label)
+
+# Scatter plot with binning for feature I3 vs I4
+# hexbinplot(I1 ~ I10 | Label, train.dt, aspect = 1)
