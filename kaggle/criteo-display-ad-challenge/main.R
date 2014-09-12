@@ -2,14 +2,17 @@ require(data.table)   # fast aggregation of large data
 require(sm)           # compare density function for classification
 require(glmnet)       # regularized logistic regression
 require(Matrix)       # sparse matrix
+require(doParallel)
 
 # input parameters
-runLR <- TRUE
-writeCSV <- TRUE
-numTrainingSamples <- 5000000
-numCVSamples <- 2500000
+runGlmnet <- TRUE
+writeCSV <- FALSE
 numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
+numTrainingSamples <- numSamplesPerDay
 maxUniqueValuesInCatFeatures <- 10 # only use categorical features with <= 10 unique values (memory constraint)
+
+# 4 cores for parallel execution
+registerDoParallel(4)
 
 # Logarithmic loss function (mostly from Kaggle, added na.rm=TRUE)
 llfun <- function(actual, prediction) {
@@ -42,6 +45,10 @@ CleanseRawDatatable <- function(dt)
   # Replace NAs in integer features with median value of column
   impute.median <- function(x) replace(x, is.na(x), round(median(x, na.rm = TRUE)))
   dt[, (int_features):=lapply(.SD, impute.median), .SDcols = int_features]
+  
+  # Normalize Id to approximate time of day
+  minId <- min(dt$Id)
+  dt[, normId:=((Id-minId) %% numSamplesPerDay) / numSamplesPerDay]
 }
 
 # Generate feature matrix from data table
@@ -52,66 +59,47 @@ GetFeatureMatrix <- function(dt)
   missingCol_features <- grep('^Missing', colnames(dt), value = TRUE)
   
   # Use categorical features with at most 10 unique values
-  numUniqueFeatureValues <- sapply(lapply(train.dt[, cat_features, with=FALSE], unique), length)
+  numUniqueFeatureValues <- sapply(lapply(dt[, cat_features, with=FALSE], unique), length)
   catFeaturesToTrain <- cat_features[numUniqueFeatureValues <= maxUniqueValuesInCatFeatures]
   
-  # Use normalized Id to approximate time of day
-  normId <- ((dt$Id - 1e7) %% numSamplesPerDay) / numSamplesPerDay
-  
   # return feature matrix
-  cbind(as.matrix(dt[, int_features, with = FALSE]),
-        as.matrix(dt[, missingCol_features, with = FALSE]),
-        model.matrix(~ ., dt[, catFeaturesToTrain, with = FALSE]),
-        poly(normId, degree = 4, raw = TRUE))
+  cbind(poly(dt$normId, degree = 4, raw = TRUE),
+        as.matrix(dt[, int_features, with = FALSE]),
+        as.matrix(dt[, missingCol_features, with = FALSE]))
+  #model.matrix(~ ., dt[, catFeaturesToTrain, with = FALSE]))
 }
 
-# Load training and cross validation data
-if (!exists('train.dt') || !exists('cv.dt'))
+# Logistic regression with Glmnet
+if (runGlmnet)
 {
-  if (!file.exists('train.csv') )
+  # Load training  data
+  if (!exists('train.dt'))
   {
-    stop('Cannot find input file train.csv.')
+    if (!file.exists('train.csv') )
+    {
+      stop('Cannot find input file train.csv.')
+    }
+    
+    train.dt <- fread('train.csv', sep = ',', nrows = numTrainingSamples, header = TRUE)
+    CleanseRawDatatable(train.dt)
   }
   
-  set.seed(1)
-  numRows <- numTrainingSamples + numCVSamples
-  randomSeq <- sample(1:numRows, numRows)
+  # k-fold cross validation using glmnet
+  train.fit <- cv.glmnet(x = GetFeatureMatrix(train.dt),
+                         y = as.matrix(train.dt$Label),
+                         nfolds = 10,
+                         family = "binomial",
+                         parallel = TRUE)
   
-  data.dt <- fread('train.csv',
-                   sep = ',',
-                   nrows = numRows,
-                   header = TRUE)
-  
-  CleanseRawDatatable(data.dt)
-  
-  train.dt <- data.dt[randomSeq[1:numTrainingSamples],]
-  cv.dt <- data.dt[randomSeq[(numTrainingSamples+1):numRows],]
-  
-  rm(data.dt)
-}
-
-# Logistic regression
-if (runLR)
-{
-  # train regularized logistic model with training set
-  train.lr <- glmnet(GetFeatureMatrix(train.dt),
-                     as.matrix(train.dt$Label),
-                     family = "binomial")
-  
-  # run predictions on cross validation set and find the best score
-  cv.scores <- sapply(as.data.frame(predict(train.lr, 
-                                            GetFeatureMatrix(cv.dt),
-                                            type = "response")),
-                      function(x) { llfun(as.numeric(cv.dt$Label)-1, x) })
-  cv.bestscore <- min(cv.scores)
-  cv.bestlambda <- train.lr$lambda[which.min(cv.scores)]
-  cv.dt[, Predicted:=predict(train.lr, 
-                             GetFeatureMatrix(cv.dt),
-                             type = "response",
-                             s = cv.bestlambda)]
+  # Compute LogLoss score on training set
+  train.dt[, Predicted:=predict(train.fit,
+                                GetFeatureMatrix(train.dt),
+                                type = "response",
+                                s = "lambda.min")]
+  train.score <- llfun(as.numeric(train.dt$Label)-1, train.dt$Predicted)
   
   # Plot prediction vs label of cross validation data
-  sm.density.compare(cv.dt$Predicted, cv.dt$Label)
+  sm.density.compare(train.dt$Predicted, train.dt$Label)
 }
 
 # Write predictions to submission.csv
@@ -128,16 +116,16 @@ if (writeCSV)
                      sep = ',',
                      header = TRUE)
     
-    # Add Label column (set to NA) to test data to match the dimension of trainig data
+    # Add Label column (set to NA) to test data to match the dimension of training data
     test.dt[, Label:=NA]
     
     CleanseRawDatatable(test.dt)
   }
   
-  test.dt[, Predicted:=predict(train.lr,
+  test.dt[, Predicted:=predict(train.fit,
                                GetFeatureMatrix(test.dt),
                                type = "response",
-                               s = cv.bestlambda)]
+                               s = "lambda.min")]
   
   test.dt[, Predicted:=round(Predicted, 12)]
   
