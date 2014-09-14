@@ -3,6 +3,7 @@
 
 import random
 import csv
+import math
 
 def file_len(fname):
   with open(fname) as f:
@@ -14,22 +15,21 @@ def file_len(fname):
     return i + 1
   
 def generate_sample(fname, fsize, count_desired, outfname, has_header=True):
-  result = []
   
-  print(fname)
-  print(fsize)
-  print(count_desired)
-  print(outfname)
-
-  p_select = count_desired / fsize
-  print(p_select)
+  print("Generating file", outfname , "with ~", count_desired, "samples") 
+  
+  result = []
+  p_select = count_desired / fsize  
+  order = (int)(math.floor(math.log10(count_desired)))
+  
   count_added = 0
   for i, l in enumerate(open(fname)):
     if i == 0 and has_header:
       continue
     elif random.random() < p_select:
-      count_added += 1
-      print("Added", count_added, "lines total ( target =", count_desired,")")
       result.append(l)
+      count_added += 1
+      if (count_added % 10**(order-1) == 0):
+        print("Added", count_added, "lines total ( target =", count_desired,")")
   outfile=open(outfname , 'w')    
   outfile.write("".join(result))
