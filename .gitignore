@@ -1,5 +1,9 @@
 sampleSubmission.csv
 test.tsv.zip
 train.tsv.zip
-kaggle/criteo-display-ad-challenge/data/random_submission.zip
-kaggle/criteo-display-ad-challenge/data/test.zip
+kaggle/criteo-display-ad-challenge/__pycache__
+kaggle/criteo-display-ad-challenge/random_submission.zip
+kaggle/criteo-display-ad-challenge/train.zip
+kaggle/criteo-display-ad-challenge/train.csv
+kaggle/criteo-display-ad-challenge/test.zip
+kaggle/criteo-display-ad-challenge/test.csv
