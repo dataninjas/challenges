@@ -10,6 +10,8 @@ writeCSV <- FALSE
 numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
 numTrainingSamples <- numSamplesPerDay
 maxUniqueValuesInCatFeatures <- 10 # only use categorical features with <= 10 unique values (memory constraint)
+#trainFile <- 'train.csv'
+trainFile <- 'train_sample_10000.csv'
 
 # 4 cores for parallel execution
 registerDoParallel(4)
@@ -75,12 +77,12 @@ if (runGlmnet)
   # Load training  data
   if (!exists('train.dt'))
   {
-    if (!file.exists('train.csv') )
+    if (!file.exists(trainFile) )
     {
-      stop('Cannot find input file train.csv.')
+      stop(paste('Cannot find input file', trainFile))
     }
     
-    train.dt <- fread('train.csv', sep = ',', nrows = numTrainingSamples, header = TRUE)
+    train.dt <- fread(trainFile, sep = ',', nrows = numTrainingSamples, header = TRUE)
     CleanseRawDatatable(train.dt)
   }
   
