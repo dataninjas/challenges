@@ -12,6 +12,9 @@ CleanseRawDatatable <- function(dt)
   # Convert label column to factor
   dt[, Label:=as.factor(Label)]
   
+  # Convert type column to factor
+  dt[, type:=as.factor(type)]
+  
   # Add indictor variables for missing integer features
   missingCols <- sapply(int_features, function(x) { paste('Missing', x, sep='_') })
   dt[, (missingCols):=lapply(.SD, is.na), .SDcols = int_features]
