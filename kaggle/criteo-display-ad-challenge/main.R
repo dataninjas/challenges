@@ -1,5 +1,6 @@
 # source our custom functions
 source('dataPreparation.R')
+source('dummy.R')
 
 # load required libraries
 require(data.table)   # fast aggregation of large data
@@ -42,15 +43,15 @@ GetFeatureMatrix <- function(dt)
   cat_features <- grep('^C[0-9]+', colnames(dt), value=TRUE)
   missingCol_features <- grep('^Missing', colnames(dt), value = TRUE)
   
-  # Use categorical features with at most 10 unique values
-  numUniqueFeatureValues <- sapply(lapply(dt[, cat_features, with=FALSE], unique), length)
-  catFeaturesToTrain <- cat_features[numUniqueFeatureValues <= maxUniqueValuesInCatFeatures]
+  # Use dummy variables for categorical features, for states that exist in at least 1% data
+  dummy <- GetDummyVariables(dt[, cat_features, with = FALSE])
+  dummy_cols <- (colMeans(dummy) > 0.1)
   
   # return feature matrix
   cbind(poly(dt$normId, degree = 5, raw = TRUE),
         as.matrix(dt[, int_features, with = FALSE]),
-        as.matrix(dt[, missingCol_features, with = FALSE]))
-        #model.matrix(~ ., dt[, catFeaturesToTrain, with = FALSE]))
+        as.matrix(dt[, missingCol_features, with = FALSE]),
+        as.matrix(dummy[, dummy_cols]))
 }
 
 # Logistic regression with Glmnet
