@@ -26,6 +26,7 @@ if (smallDataset) {
   testFile <- NULL
   submitFile <- 'test.csv'
 }
+numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
 
 # 4 cores for parallel execution
 registerDoParallel(4)
@@ -72,7 +73,7 @@ if (!exists('data.dt'))
     data.dt <- rbind2(data.dt, test.dt)
     rm(test.dt)
   }    
-    
+
   if (runSubmit)
   {
     if (!file.exists(submitFile))
