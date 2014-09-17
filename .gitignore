@@ -7,3 +7,9 @@ kaggle/criteo-display-ad-challenge/train.zip
 kaggle/criteo-display-ad-challenge/train.csv
 kaggle/criteo-display-ad-challenge/test.zip
 kaggle/criteo-display-ad-challenge/test.csv
+kaggle/criteo-display-ad-challenge/.RData
+kaggle/criteo-display-ad-challenge/.Rhistory
+kaggle/criteo-display-ad-challenge/train_sample_1000.csv
+kaggle/criteo-display-ad-challenge/train_sample_10000.csv
+kaggle/criteo-display-ad-challenge/train_sample_100000.csv
+kaggle/criteo-display-ad-challenge/train_sample_1000000.csv
