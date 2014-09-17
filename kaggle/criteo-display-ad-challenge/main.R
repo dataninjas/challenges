@@ -9,13 +9,19 @@ require(Matrix)       # sparse matrix
 require(doParallel)
 
 # input parameters
-runGlmnet <- TRUE
-writeCSV <- FALSE
+smallDataset <- TRUE
+runTrain <- TRUE
+runSubmit <- FALSE
 numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
-numTrainingSamples <- numSamplesPerDay
 maxUniqueValuesInCatFeatures <- 10 # only use categorical features with <= 10 unique values (memory constraint)
-#trainFile <- 'train.csv'
-trainFile <- 'train_sample_10000.csv'
+
+if (smallDataset) {
+  trainFile <- 'train_sample_100000.csv'
+  testFile <- 'train_sample_20000.csv'
+} else {
+  trainFile <- 'train_sample_6548660.csv'
+  testFile <- NULL
+}
 
 # 4 cores for parallel execution
 registerDoParallel(4)
@@ -29,7 +35,6 @@ llfun <- function(actual, prediction) {
   return(logloss)
 }
 
-
 # Generate feature matrix from data table
 GetFeatureMatrix <- function(dt)
 {
@@ -42,16 +47,16 @@ GetFeatureMatrix <- function(dt)
   catFeaturesToTrain <- cat_features[numUniqueFeatureValues <= maxUniqueValuesInCatFeatures]
   
   # return feature matrix
-  cbind(poly(dt$normId, degree = 4, raw = TRUE),
+  cbind(poly(dt$normId, degree = 5, raw = TRUE),
         as.matrix(dt[, int_features, with = FALSE]),
         as.matrix(dt[, missingCol_features, with = FALSE]))
-  #model.matrix(~ ., dt[, catFeaturesToTrain, with = FALSE]))
+        #model.matrix(~ ., dt[, catFeaturesToTrain, with = FALSE]))
 }
 
 # Logistic regression with Glmnet
-if (runGlmnet)
+if (runTrain)
 {
-  # Load training  data
+  # Load training data
   if (!exists('train.dt'))
   {
     if (!file.exists(trainFile) )
@@ -59,11 +64,8 @@ if (runGlmnet)
       stop(paste('Cannot find input file', trainFile))
     }
     
-    train.dt <- fread(trainFile, sep = ',', nrows = numTrainingSamples, header = TRUE)
+    train.dt <- fread(trainFile, sep = ',', header = TRUE)
     CleanseRawDatatable(train.dt)
-    # Normalize Id to approximate time of day
-    minId <- min(dt$Id)
-    dt[, normId:=((Id-minId) %% numSamplesPerDay) / numSamplesPerDay]
   }
   
   # k-fold cross validation using glmnet
@@ -73,45 +75,58 @@ if (runGlmnet)
                          family = "binomial",
                          parallel = TRUE)
   
-  # Compute LogLoss score on training set
-  train.dt[, Predicted:=predict(train.fit,
-                                GetFeatureMatrix(train.dt),
-                                type = "response",
-                                s = "lambda.min")]
-  train.score <- llfun(as.numeric(train.dt$Label)-1, train.dt$Predicted)
+  # Load test data
+  if (!exists('test.dt'))
+  {
+    if (!file.exists(testFile) )
+    {
+      stop(paste('Cannot find input file', testFile))
+    }
+    
+    test.dt <- fread(testFile, sep = ',', header = TRUE)
+    CleanseRawDatatable(test.dt)
+  }  
   
-  # Plot prediction vs label of cross validation data
-  sm.density.compare(train.dt$Predicted, train.dt$Label)
+  # Compute LogLoss score on test set
+  test.dt[, Predicted:=predict(train.fit,
+                                 GetFeatureMatrix(test.dt),
+                                 type = "response",
+                                 s = "lambda.min")]
+  
+  test.score <- llfun(as.numeric(test.dt$Label)-1, test.dt$Predicted)
+  
+  # Plot prediction vs label of test data
+  sm.density.compare(test.dt$Predicted, test.dt$Label)
 }
 
 # Write predictions to submission.csv
-if (writeCSV) 
+if (runSubmit) 
 {
   # Load test data
-  if (!exists('test.dt'))
+  if (!exists('submit.dt'))
   {
     if (!file.exists('test.csv'))
     {
       stop('Cannot find input file test.csv.')
     }
-    test.dt <- fread('test.csv',
+    submit.dt <- fread('test.csv',
                      sep = ',',
                      header = TRUE)
     
     # Add Label column (set to NA) to test data to match the dimension of training data
-    test.dt[, Label:=NA]
+    submit.dt[, Label:=NA]
     
     CleanseRawDatatable(test.dt)
   }
   
-  test.dt[, Predicted:=predict(train.fit,
-                               GetFeatureMatrix(test.dt),
+  submit.dt[, Predicted:=predict(train.fit,
+                               GetFeatureMatrix(submit.dt),
                                type = "response",
                                s = "lambda.min")]
   
-  test.dt[, Predicted:=round(Predicted, 12)]
+  submit.dt[, Predicted:=round(Predicted, 12)]
   
-  write.csv(format(test.dt[,c('Id','Predicted'), with=FALSE],
+  write.csv(format(submit.dt[,c('Id','Predicted'), with=FALSE],
                    scientific=FALSE), 
             'submission.csv',
             quote=FALSE,
