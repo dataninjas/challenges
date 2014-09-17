@@ -1,6 +1,7 @@
 # source our custom functions
 source('dataPreparation.R')
 source('dummy.R')
+source('llfun.R')
 
 # load required libraries
 require(data.table)   # fast aggregation of large data
@@ -13,28 +14,21 @@ require(doParallel)
 smallDataset <- TRUE
 runTrain <- TRUE
 runSubmit <- FALSE
-numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
-maxUniqueValuesInCatFeatures <- 10 # only use categorical features with <= 10 unique values (memory constraint)
 
+# constants
+numSamplesPerDay <- 6548660 # computed by numRows in train.csv / 7
 if (smallDataset) {
   trainFile <- 'train_sample_100000.csv'
   testFile <- 'train_sample_20000.csv'
+  submitFile <- NULL
 } else {
   trainFile <- 'train_sample_6548660.csv'
   testFile <- NULL
+  submitFile <- 'test.csv'
 }
 
 # 4 cores for parallel execution
 registerDoParallel(4)
-
-# Logarithmic loss function (mostly from Kaggle, added na.rm=TRUE)
-llfun <- function(actual, prediction) {
-  epsilon <- .000000000000001
-  yhat <- pmin(pmax(prediction, rep(epsilon)), 1-rep(epsilon))
-  logloss <- -mean(actual*log(yhat)
-                   + (1-actual)*log(1 - yhat), na.rm=TRUE)
-  return(logloss)
-}
 
 # Generate feature matrix from data table
 GetFeatureMatrix <- function(dt)
@@ -45,7 +39,7 @@ GetFeatureMatrix <- function(dt)
   
   # Use dummy variables for categorical features, for states that exist in at least 1% data
   dummy <- GetDummyVariables(dt[, cat_features, with = FALSE])
-  dummy_cols <- (colMeans(dummy) > 0.1)
+  dummy_cols <- (colMeans(dummy) > 0.01)
   
   # return feature matrix
   cbind(poly(dt$normId, degree = 5, raw = TRUE),
@@ -54,84 +48,83 @@ GetFeatureMatrix <- function(dt)
         as.matrix(dummy[, dummy_cols]))
 }
 
-# Logistic regression with Glmnet
-if (runTrain)
+# Load data
+if (!exists('data.dt'))
 {
-  # Load training data
-  if (!exists('train.dt'))
+  if (runTrain)
   {
-    if (!file.exists(trainFile) )
+    if (!file.exists(trainFile))
     {
       stop(paste('Cannot find input file', trainFile))
     }
+    data.dt <- fread(trainFile, sep = ',', header = TRUE)
+    data.dt[, type:="train"]
+    numTrainSamples <- dim(data.dt)[1]
     
-    train.dt <- fread(trainFile, sep = ',', header = TRUE)
-    CleanseRawDatatable(train.dt)
+    if (!file.exists(testFile))
+    {
+      stop(paste('Cannot find input file', testFile))
+    }
+    test.dt <- fread(testFile, sep = ',', header = TRUE)
+    test.dt[, type:="test"]
+    numTestSamples <- dim(test.dt)[1]
+    
+    data.dt <- rbind2(data.dt, test.dt)
+    rm(test.dt)
+  }    
+    
+  if (runSubmit)
+  {
+    if (!file.exists(submitFile))
+    {
+      stop(paste('Cannot find input file', submitFile))
+    }
+    submit.dt <- fread(submitFile, sep = ',', header = TRUE)
+    submit.dt[, type:="submit"]
+      
+    # Add Label column (set to NA) to test data to match the dimension of training data
+    submit.dt[, Label:=NA]
+    
+    data.dt <- rbind2(data.dt, submit.dt)
+    rm(submit.dt)
   }
   
+  CleanseRawDatatable(data.dt)
+
+  Features <- GetFeatureMatrix(data.dt)
+}
+
+# Logistic regression with Glmnet
+if (runTrain)
+{
   # k-fold cross validation using glmnet
-  train.fit <- cv.glmnet(x = GetFeatureMatrix(train.dt),
-                         y = as.matrix(train.dt$Label),
+  train.fit <- cv.glmnet(x = Features[1:numTrainSamples,],
+                         y = as.matrix(data.dt[1:numTrainSamples, "Label", with = FALSE]),
                          nfolds = 10,
                          family = "binomial",
                          parallel = TRUE)
   
-  # Load test data
-  if (!exists('test.dt'))
-  {
-    if (!file.exists(testFile) )
-    {
-      stop(paste('Cannot find input file', testFile))
-    }
-    
-    test.dt <- fread(testFile, sep = ',', header = TRUE)
-    CleanseRawDatatable(test.dt)
-  }  
+  # Make predictions based on fitted model
+  data.dt[, Predict:= predict(train.fit,
+                              Features,
+                              type = "response",
+                              s = "lambda.min")]
   
   # Compute LogLoss score on test set
-  test.dt[, Predicted:=predict(train.fit,
-                                 GetFeatureMatrix(test.dt),
-                                 type = "response",
-                                 s = "lambda.min")]
-  
-  test.score <- llfun(as.numeric(test.dt$Label)-1, test.dt$Predicted)
-  
-  # Plot prediction vs label of test data
-  sm.density.compare(test.dt$Predicted, test.dt$Label)
+  test.score <- llfun(as.numeric(data.dt$Label)[(numTrainSamples+1):(numTrainSamples+numTestSamples)]-1, 
+                      data.dt$Predict[(numTrainSamples+1):(numTrainSamples+numTestSamples)])
 }
-
+ 
 # Write predictions to submission.csv
 if (runSubmit) 
 {
-  # Load test data
-  if (!exists('submit.dt'))
-  {
-    if (!file.exists('test.csv'))
-    {
-      stop('Cannot find input file test.csv.')
-    }
-    submit.dt <- fread('test.csv',
-                     sep = ',',
-                     header = TRUE)
-    
-    # Add Label column (set to NA) to test data to match the dimension of training data
-    submit.dt[, Label:=NA]
-    
-    CleanseRawDatatable(test.dt)
-  }
+  data.dt[, Predicted:=round(Predicted, 12)]
   
-  submit.dt[, Predicted:=predict(train.fit,
-                               GetFeatureMatrix(submit.dt),
-                               type = "response",
-                               s = "lambda.min")]
-  
-  submit.dt[, Predicted:=round(Predicted, 12)]
-  
-  write.csv(format(submit.dt[,c('Id','Predicted'), with=FALSE],
-                   scientific=FALSE), 
-            'submission.csv',
-            quote=FALSE,
-            row.names = FALSE)
+#   write.csv(format(data.dt[,c('Id','Predicted'), with=FALSE],
+#                    scientific=FALSE), 
+#             'submission.csv',
+#             quote=FALSE,
+#             row.names = FALSE)
 }
 
 # Compare PDF of feature I10 for Label 0 vs 1
