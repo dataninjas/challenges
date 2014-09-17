@@ -20,4 +20,8 @@ CleanseRawDatatable <- function(dt)
   # Replace NAs in integer features with median value of column
   impute.median <- function(x) replace(x, is.na(x), round(median(x, na.rm = TRUE)))
   dt[, (int_features):=lapply(.SD, impute.median), .SDcols = int_features]
+  
+  # Normalize Id to approximate time of day
+  minId <- min(dt$Id)
+  dt[, normId:=((Id-minId) %% numSamplesPerDay) / numSamplesPerDay]
 }

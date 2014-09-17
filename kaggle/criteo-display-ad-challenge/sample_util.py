@@ -25,7 +25,7 @@ def generate_sample(fname, fsize, count_desired, outfname, has_header=True):
   count_added = 0
   for i, l in enumerate(open(fname)):
     if i == 0 and has_header:
-	  result.append(l)	
+      result.append(l)	
       continue
     elif random.random() < p_select:
       result.append(l)
